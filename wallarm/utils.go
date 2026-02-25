@@ -20,6 +20,145 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 )
 
+// HitToActionSet converts hit fields (path, domain, poolid) into a *schema.Set
+// whose elements match defaultResourceRuleActionSchema. The returned Set can be
+// passed directly to d.Set("action", ...) on a wallarm_rule_* resource.
+//
+// Conversion rules:
+//   - domain  → iequal match on the HOST request header
+//   - poolid  → equal match on the application instance (poolid > 0 only)
+//   - path    → equal matches on path[0..n-2] segments, action_name, and
+//     action_ext (extension after the last dot in the final segment).
+//     The URI point is intentionally excluded per Wallarm rule semantics.
+func HitToActionSet(hitPath, hitDomain string, hitPoolid int) *schema.Set {
+	actionsSet := &schema.Set{F: hashResponseActionDetails}
+
+	// domain → iequal HOST header condition
+	if hitDomain != "" {
+		host := wallarm.ActionDetails{
+			Type:  "iequal",
+			Point: []interface{}{"header", "HOST"},
+			Value: hitDomain,
+		}
+		if m, err := actionDetailsToMap(host); err == nil {
+			actionsSet.Add(m)
+		}
+	}
+
+	// poolid → instance (application) condition
+	if hitPoolid > 0 {
+		instance := wallarm.ActionDetails{
+			Type:  "equal",
+			Point: []interface{}{"instance"},
+			Value: strconv.Itoa(hitPoolid),
+		}
+		if m, err := actionDetailsToMap(instance); err == nil {
+			actionsSet.Add(m)
+		}
+	}
+
+	// path → path[i] + action_name + action_ext conditions
+	if hitPath != "" {
+		// Strip leading/trailing slashes and split into segments.
+		// Empty segments (e.g. from a trailing slash) are discarded.
+		if hitPath == "/" {
+			path := wallarm.ActionDetails{
+				Type:  "absent",
+				Point: []interface{}{"path", 0},
+				Value: nil,
+			}
+			if m, err := actionDetailsToMap(path); err == nil {
+				actionsSet.Add(m)
+			}
+			actionName := wallarm.ActionDetails{
+				Type:  "equal",
+				Point: []interface{}{"action_name"},
+				Value: "",
+			}
+			if m, err := actionDetailsToMap(actionName); err == nil {
+				actionsSet.Add(m)
+			}
+			actionExt := wallarm.ActionDetails{
+				Type:  "absent",
+				Point: []interface{}{"action_ext"},
+				Value: "",
+			}
+			if m, err := actionDetailsToMap(actionExt); err == nil {
+				actionsSet.Add(m)
+			}
+
+			return actionsSet
+		}
+		raw := strings.Trim(hitPath, "/")
+		parts := strings.Split(raw, "/")
+		nonEmpty := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if p != "" {
+				nonEmpty = append(nonEmpty, p)
+			}
+		}
+
+		for i, segment := range nonEmpty {
+			if i < len(nonEmpty)-1 {
+				// Intermediate segment: path[i] equal condition.
+				path := wallarm.ActionDetails{
+					Type:  "equal",
+					Point: []interface{}{"path", float64(i)},
+					Value: segment,
+				}
+				if m, err := actionDetailsToMap(path); err == nil {
+					actionsSet.Add(m)
+				}
+				continue
+			}
+			if i == len(nonEmpty)-1 {
+				// Last segment: path[i] absent condition.
+				path := wallarm.ActionDetails{
+					Type:  "absent",
+					Point: []interface{}{"path", float64(i)},
+					Value: nil,
+				}
+				if m, err := actionDetailsToMap(path); err == nil {
+					actionsSet.Add(m)
+				}
+				// continue
+			}
+
+			// Final segment: split into action_name and action_ext.
+			name := segment
+			ext := ""
+			if dotIdx := strings.LastIndex(segment, "."); dotIdx > 0 {
+				ext = segment[dotIdx+1:]
+				name = segment[:dotIdx]
+			}
+
+			actionName := wallarm.ActionDetails{
+				Type:  "equal",
+				Point: []interface{}{"action_name"},
+				Value: name,
+			}
+			if m, err := actionDetailsToMap(actionName); err == nil {
+				actionsSet.Add(m)
+			}
+
+			extType := "absent"
+			if ext != "" {
+				extType = "equal"
+			}
+			actionExt := wallarm.ActionDetails{
+				Type:  extType,
+				Point: []interface{}{"action_ext"},
+				Value: ext,
+			}
+			if m, err := actionDetailsToMap(actionExt); err == nil {
+				actionsSet.Add(m)
+			}
+		}
+	}
+
+	return actionsSet
+}
+
 type ruleNotFoundError struct {
 	clientID int
 	ruleID   int

@@ -1,0 +1,19 @@
+%{for stamp in hit.stamps}
+resource "wallarm_rule_disable_stamp" "disable_stamp_${md5(jsonencode(hit.point_wrapped))}_${stamp}" {
+  comment = "Managed by Terraform"
+  point = ${jsonencode(hit.point_wrapped)}
+  stamp = ${stamp}
+
+  %{~ for condition in hit.action ~}
+  action {
+    point = { 
+    %{~ for key, value in condition.point ~}
+      ${key} = "${value}"
+    %{~ endfor ~} 
+    }
+    %{ if condition.type != "" }type = "${condition.type}"%{ endif }
+    value = "${condition.value}"
+  }
+  %{~ endfor ~}
+}
+%{ endfor }
